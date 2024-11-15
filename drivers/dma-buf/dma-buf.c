@@ -27,7 +27,7 @@
 #include <linux/mm.h>
 #include <linux/mount.h>
 #include <linux/pseudo_fs.h>
-#include <trace/hooks/dmabuf.h>
+// #include <trace/hooks/dmabuf.h>
 #include <linux/sched/task.h>
 
 #include <uapi/linux/dma-buf.h>
@@ -224,7 +224,7 @@ static int dma_buf_mmap_internal(struct file *file, struct vm_area_struct *vma)
 	if (!dmabuf->ops->mmap)
 		return -EINVAL;
 
-	trace_android_vh_ignore_dmabuf_vmap_bounds(dmabuf, &ignore_bounds);
+	// trace_android_vh_ignore_dmabuf_vmap_bounds(dmabuf, &ignore_bounds);
 
 	/* check for overflowing the buffer's size */
 	if ((vma->vm_pgoff + vma_pages(vma) >
@@ -834,10 +834,6 @@ struct dma_buf *dma_buf_export(const struct dma_buf_export_info *exp_info)
 		dmabuf->resv = resv;
 	}
 
-	ret = dma_buf_stats_setup(dmabuf, file);
-	if (ret)
-		goto err_dmabuf;
-
 	file->private_data = dmabuf;
 	file->f_path.dentry->d_fsdata = dmabuf;
 	dmabuf->file = file;
@@ -850,12 +846,22 @@ struct dma_buf *dma_buf_export(const struct dma_buf_export_info *exp_info)
 #endif
 	mutex_unlock(&db_list.lock);
 
+	ret = dma_buf_stats_setup(dmabuf, file);
+	if (ret)
+		goto err_sysfs;
+
 	if (IS_ENABLED(CONFIG_RK_DMABUF_DEBUG))
 		dma_buf_set_default_name(dmabuf);
 
 	return dmabuf;
 
-err_dmabuf:
+err_sysfs:
+	mutex_lock(&db_list.lock);
+	list_del(&dmabuf->list_node);
+	mutex_unlock(&db_list.lock);
+	dmabuf->file = NULL;
+	file->f_path.dentry->d_fsdata = NULL;
+	file->private_data = NULL;
 	if (!resv)
 		dma_resv_fini(dmabuf->resv);
 	kfree(dmabuf);
@@ -1699,6 +1705,33 @@ out_unlock:
 EXPORT_SYMBOL_NS_GPL(dma_buf_vmap, DMA_BUF);
 
 /**
+ * dma_buf_vmap_unlocked - Create virtual mapping for the buffer object into kernel
+ * address space. Same restrictions as for vmap and friends apply.
+ * @dmabuf:	[in]	buffer to vmap
+ * @map:	[out]	returns the vmap pointer
+ *
+ * Unlocked version of dma_buf_vmap()
+ *
+ * Returns 0 on success, or a negative errno code otherwise.
+ */
+int dma_buf_vmap_unlocked(struct dma_buf *dmabuf, struct iosys_map *map)
+{
+	int ret;
+
+	iosys_map_clear(map);
+
+	if (WARN_ON(!dmabuf))
+		return -EINVAL;
+
+	dma_resv_lock(dmabuf->resv, NULL);
+	ret = dma_buf_vmap(dmabuf, map);
+	dma_resv_unlock(dmabuf->resv);
+
+	return ret;
+}
+EXPORT_SYMBOL_NS_GPL(dma_buf_vmap_unlocked, DMA_BUF);
+
+/**
  * dma_buf_vunmap - Unmap a vmap obtained by dma_buf_vmap.
  * @dmabuf:	[in]	buffer to vunmap
  * @map:	[in]	vmap pointer to vunmap
@@ -1721,6 +1754,23 @@ void dma_buf_vunmap(struct dma_buf *dmabuf, struct iosys_map *map)
 	mutex_unlock(&dmabuf->lock);
 }
 EXPORT_SYMBOL_NS_GPL(dma_buf_vunmap, DMA_BUF);
+
+/**
+ * dma_buf_vunmap_unlocked - Unmap a vmap obtained by dma_buf_vmap.
+ * @dmabuf:	[in]	buffer to vunmap
+ * @map:	[in]	vmap pointer to vunmap
+ */
+void dma_buf_vunmap_unlocked(struct dma_buf *dmabuf, struct iosys_map *map)
+{
+	if (WARN_ON(!dmabuf))
+		return;
+
+	dma_resv_lock(dmabuf->resv, NULL);
+	dma_buf_vunmap(dmabuf, map);
+	dma_resv_unlock(dmabuf->resv);
+}
+EXPORT_SYMBOL_NS_GPL(dma_buf_vunmap_unlocked, DMA_BUF);
+
 
 int dma_buf_get_flags(struct dma_buf *dmabuf, unsigned long *flags)
 {
